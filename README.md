@@ -261,6 +261,7 @@ For scripted or non-interactive use:
 | `eforge resolve <scenario.yaml> -o <resolved.yaml> [--explain-composition]` | Compile an authoritative, self-contained scenario without generating logs |
 | `eforge pack <command>` | Discover, author, lock, validate, package, inspect, import, or hydrate industry and organization packs |
 | `eforge eval <output_dir> [-s <scenario.yaml>] [--allow-large-evaluation]` | Evaluate quality; new bundles use their adjacent resolved scenario, while legacy bundles require `--scenario` |
+| `eforge export duckdb <output_dir> -o <file.duckdb> [-s <scenario.yaml>] [--overwrite]` | Load a generated dataset into a DuckDB database for SQL investigation; excludes ground truth and requires the optional `duckdb` extra |
 | `eforge info [field]` | Show installation info, config paths, and data inventories. Pass a dot-path field for a specific value (e.g., `eforge info personas`). Use `--fields` to list available fields, `--json` for machine output. |
 | `eforge schema <selector> [--json]` | Show one focused installed-version authored-scenario contract, such as `environment.network_identities` or `event.email_read`. |
 | `eforge validate-config` | Validate config files for cross-reference integrity. Use `--json` for machine output. |
@@ -381,6 +382,8 @@ source launches, installer builds, test tiers, coding conventions and external-p
   recovery, status, storage, and filesystem behavior
 - [Studio State Upgrades and Recovery](docs/studio-state-upgrades.md) — UI state contracts,
   verified backups, interrupted-upgrade recovery and native release gates
+- [DuckDB Export](docs/reference/DUCKDB_EXPORT.md) — Loading generated evidence into DuckDB for
+  SQL investigation
 - [Output Target Ingest Guides](docs/output-targets/README.md) — Default, SOF-ELK, and Splunk
   layouts, parsing, and ingestion
 - [Adversarial Payload Testing](docs/reference/adversarial_payload.md) — Safe synthetic payload and

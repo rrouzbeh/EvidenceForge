@@ -40,7 +40,12 @@ from evidenceforge.evaluation.models import (
     PillarScore,
     QualityReport,
 )
-from evidenceforge.evaluation.parsers import ParsedRecord, discover_log_files, get_parser
+from evidenceforge.evaluation.parsers import (
+    ParsedRecord,
+    discover_log_files,
+    get_parser,
+    source_instance_for_path,
+)
 from evidenceforge.evaluation.pillars import (
     CausalityScorer,
     ParseabilityScorer,
@@ -592,14 +597,7 @@ class EvaluationEngine:
     def _source_instance(self, path: Path) -> str:
         """Return the nearest non-year directory identifying a host or sensor."""
 
-        try:
-            parts = path.resolve().relative_to(self.output_dir.resolve()).parts[:-1]
-        except ValueError:
-            return "__artifact__"
-        for part in reversed(parts):
-            if not (len(part) == 4 and part.isdigit()):
-                return part
-        return "__direct__"
+        return source_instance_for_path(path, self.output_dir)
 
     @staticmethod
     def _compute_overall(pillars: list[PillarScore]) -> float | None:

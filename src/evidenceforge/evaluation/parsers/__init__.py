@@ -176,6 +176,28 @@ def _discover_bash_history_files(output_dir: Path, output_root: Path) -> list[Pa
     return sorted(files, key=lambda path: path.as_posix())
 
 
+def source_instance_for_path(path: Path, output_dir: Path) -> str:
+    """Return the nearest non-year directory identifying a host or sensor.
+
+    Args:
+        path: A log file returned by ``discover_log_files``.
+        output_dir: The data directory that was scanned.
+
+    Returns:
+        The host or sensor directory name, ``"__direct__"`` for files at the top of
+        ``output_dir``, or ``"__artifact__"`` for files outside it.
+    """
+
+    try:
+        parts = path.resolve().relative_to(output_dir.resolve()).parts[:-1]
+    except ValueError:
+        return "__artifact__"
+    for part in reversed(parts):
+        if not (len(part) == 4 and part.isdigit()):
+            return part
+    return "__direct__"
+
+
 def discover_log_files(output_dir: Path, output_target: Any = None) -> dict[str, list[Path]]:
     """Discover log files in an output directory and map to format parsers.
 

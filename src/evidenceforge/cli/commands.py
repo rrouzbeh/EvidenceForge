@@ -70,6 +70,7 @@ from evidenceforge.cli.progress_jsonl import ProgressJSONLWriter
 from evidenceforge.cli.resource_commands import resources_app
 from evidenceforge.composition import (
     CompiledScenario,
+    EffectiveConfig,
     compile_scenario,
     semantic_resolved_difference_sections,
     with_runtime_scenario,
@@ -345,6 +346,11 @@ app.add_typer(scenario_app, name="scenario")
 app.add_typer(pack_app, name="pack")
 app.add_typer(checkpoint_app, name="checkpoint")
 app.add_typer(resources_app, name="resources")
+export_app = typer.Typer(
+    help="Export a generated dataset for SQL investigation.",
+    no_args_is_help=True,
+)
+app.add_typer(export_app, name="export")
 console = Console()
 
 _STORAGE_SAMPLE_SIZE = 3
@@ -2800,6 +2806,103 @@ def validate(
     console.print("\n[bold green]✓ Scenario is valid.[/bold green]")
 
 
+def _load_dataset_inputs(
+    output_dir: Path,
+    scenario_file: Path | None,
+    *,
+    allow_scenario_mismatch: bool,
+    status_console: Console,
+) -> tuple[Scenario, EffectiveConfig | None, Path]:
+    """Resolve a generated dataset's scenario, effective config, and data directory.
+
+    Authoritative bundles are verified and use their resolved scenario; legacy bundles
+    require ``scenario_file``. Errors are reported on ``status_console`` and exit with
+    the CLI's input or schema-validation codes.
+
+    Returns:
+        The scenario, its effective configuration, and the directory holding the logs.
+    """
+    evaluation_output_dir = output_dir
+    try:
+        if (output_dir / GENERATION_MANIFEST_FILENAME).is_file():
+            bundle_root = output_dir
+        elif (
+            output_dir.name == "data"
+            and (output_dir.parent / GENERATION_MANIFEST_FILENAME).is_file()
+        ):
+            bundle_root = output_dir.parent
+        else:
+            bundle_root = None
+
+        if bundle_root is not None:
+            manifest = verify_generation_bundle(bundle_root)
+            bundle_compiled = compile_scenario(bundle_root / RESOLVED_SCENARIO_FILENAME)
+            if manifest.get("compiled_sha256") != bundle_compiled.digests.get("compiled_sha256"):
+                raise SchemaValidationError(
+                    "generation manifest compiled digest does not match resolved scenario"
+                )
+            scenario = bundle_compiled.scenario
+            effective_config = bundle_compiled.effective_config
+            if output_dir == bundle_root and (bundle_root / "data").is_dir():
+                evaluation_output_dir = bundle_root / "data"
+            status_console.print(f"[green]✓[/green] Verified authoritative bundle: {scenario.name}")
+            if scenario_file is not None:
+                candidate = compile_scenario(
+                    scenario_file,
+                    generation_seed=int(manifest["generation_seed"]),
+                )
+                candidate_scenario = candidate.scenario.model_copy(deep=True)
+                candidate_scenario.output.logs = [
+                    {"format": value} for value in manifest.get("formats", [])
+                ]
+                candidate = with_runtime_scenario(candidate, candidate_scenario)
+                if candidate.digests.get("compiled_sha256") != manifest.get("compiled_sha256"):
+                    if not allow_scenario_mismatch:
+                        raise SchemaValidationError(
+                            "authored scenario does not match the authoritative generation bundle; "
+                            "use --allow-scenario-mismatch to evaluate the bundle anyway"
+                        )
+                    status_console.print(
+                        "[yellow]Authored scenario mismatch accepted; evaluation uses the "
+                        "bundle's resolved scenario.[/yellow]"
+                    )
+        else:
+            if scenario_file is None:
+                raise FileNotFoundError(
+                    "legacy bundle has no authoritative artifacts; pass --scenario"
+                )
+            legacy_compiled = compile_scenario(scenario_file)
+            scenario = legacy_compiled.scenario
+            effective_config = legacy_compiled.effective_config
+            status_console.print(f"[green]✓[/green] Loaded legacy scenario: {scenario.name}")
+    except ScenarioIncludeError as e:
+        status_console.print(
+            "[bold red]Error:[/bold red] Scenario include validation failed",
+            style="red",
+        )
+        status_console.print(f"  • {e}", style="red")
+        raise typer.Exit(EXIT_SCHEMA_VALIDATION)
+    except ValidationError as e:
+        status_console.print(
+            "[bold red]Error:[/bold red] Scenario schema validation failed",
+            style="red",
+        )
+        for error in e.errors():
+            field = " -> ".join(str(loc) for loc in error["loc"])
+            status_console.print(f"  • {field}: {error['msg']}", style="red")
+        raise typer.Exit(EXIT_SCHEMA_VALIDATION)
+    except EvidenceForgeError as e:
+        status_console.print(f"[bold red]Error:[/bold red] {e}", style="red")
+        raise typer.Exit(EXIT_SCHEMA_VALIDATION)
+    except (OSError, UnicodeError, yaml.YAMLError, ValueError) as e:
+        status_console.print(
+            f"[bold red]Error:[/bold red] Failed to load scenario: {e}",
+            style="red",
+        )
+        raise typer.Exit(EXIT_INPUT_ERROR)
+    return scenario, effective_config, evaluation_output_dir
+
+
 @app.command("eval")
 def eval_cmd(
     output_dir: Path = typer.Argument(
@@ -2892,84 +2995,12 @@ def eval_cmd(
     if scenario_file is not None:
         status_console.print(f"Scenario comparison: {scenario_file}")
 
-    evaluation_output_dir = output_dir
-    try:
-        if (output_dir / GENERATION_MANIFEST_FILENAME).is_file():
-            bundle_root = output_dir
-        elif (
-            output_dir.name == "data"
-            and (output_dir.parent / GENERATION_MANIFEST_FILENAME).is_file()
-        ):
-            bundle_root = output_dir.parent
-        else:
-            bundle_root = None
-
-        if bundle_root is not None:
-            manifest = verify_generation_bundle(bundle_root)
-            bundle_compiled = compile_scenario(bundle_root / RESOLVED_SCENARIO_FILENAME)
-            if manifest.get("compiled_sha256") != bundle_compiled.digests.get("compiled_sha256"):
-                raise SchemaValidationError(
-                    "generation manifest compiled digest does not match resolved scenario"
-                )
-            scenario = bundle_compiled.scenario
-            effective_config = bundle_compiled.effective_config
-            if output_dir == bundle_root and (bundle_root / "data").is_dir():
-                evaluation_output_dir = bundle_root / "data"
-            status_console.print(f"[green]✓[/green] Verified authoritative bundle: {scenario.name}")
-            if scenario_file is not None:
-                candidate = compile_scenario(
-                    scenario_file,
-                    generation_seed=int(manifest["generation_seed"]),
-                )
-                candidate_scenario = candidate.scenario.model_copy(deep=True)
-                candidate_scenario.output.logs = [
-                    {"format": value} for value in manifest.get("formats", [])
-                ]
-                candidate = with_runtime_scenario(candidate, candidate_scenario)
-                if candidate.digests.get("compiled_sha256") != manifest.get("compiled_sha256"):
-                    if not allow_scenario_mismatch:
-                        raise SchemaValidationError(
-                            "authored scenario does not match the authoritative generation bundle; "
-                            "use --allow-scenario-mismatch to evaluate the bundle anyway"
-                        )
-                    status_console.print(
-                        "[yellow]Authored scenario mismatch accepted; evaluation uses the "
-                        "bundle's resolved scenario.[/yellow]"
-                    )
-        else:
-            if scenario_file is None:
-                raise FileNotFoundError(
-                    "legacy bundle has no authoritative artifacts; pass --scenario"
-                )
-            legacy_compiled = compile_scenario(scenario_file)
-            scenario = legacy_compiled.scenario
-            effective_config = legacy_compiled.effective_config
-            status_console.print(f"[green]✓[/green] Loaded legacy scenario: {scenario.name}")
-    except ScenarioIncludeError as e:
-        status_console.print(
-            "[bold red]Error:[/bold red] Scenario include validation failed",
-            style="red",
-        )
-        status_console.print(f"  • {e}", style="red")
-        raise typer.Exit(EXIT_SCHEMA_VALIDATION)
-    except ValidationError as e:
-        status_console.print(
-            "[bold red]Error:[/bold red] Scenario schema validation failed",
-            style="red",
-        )
-        for error in e.errors():
-            field = " -> ".join(str(loc) for loc in error["loc"])
-            status_console.print(f"  • {field}: {error['msg']}", style="red")
-        raise typer.Exit(EXIT_SCHEMA_VALIDATION)
-    except EvidenceForgeError as e:
-        status_console.print(f"[bold red]Error:[/bold red] {e}", style="red")
-        raise typer.Exit(EXIT_SCHEMA_VALIDATION)
-    except (OSError, UnicodeError, yaml.YAMLError, ValueError) as e:
-        status_console.print(
-            f"[bold red]Error:[/bold red] Failed to load scenario: {e}",
-            style="red",
-        )
-        raise typer.Exit(EXIT_INPUT_ERROR)
+    scenario, effective_config, evaluation_output_dir = _load_dataset_inputs(
+        output_dir,
+        scenario_file,
+        allow_scenario_mismatch=allow_scenario_mismatch,
+        status_console=status_console,
+    )
 
     # Run evaluation
     try:
@@ -3088,6 +3119,142 @@ def eval_cmd(
         if verbose:
             status_console.print_exception()
         raise typer.Exit(EXIT_EVAL_ERROR)
+
+
+@export_app.command("duckdb")
+def export_duckdb_cmd(
+    output_dir: Path = typer.Argument(
+        ...,
+        help="Generated dataset: the bundle root or its data/ directory",
+    ),
+    database: Path = typer.Option(
+        ...,
+        "--output",
+        "-o",
+        help="DuckDB database file to write (must be outside the data/ directory)",
+    ),
+    scenario_file: Path | None = typer.Option(
+        None,
+        "--scenario",
+        "-s",
+        help="Authored scenario; required for legacy bundles without resolved artifacts.",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace an existing database file.",
+    ),
+    allow_scenario_mismatch: bool = typer.Option(
+        False,
+        "--allow-scenario-mismatch",
+        help="Export the authoritative bundle despite an authored-scenario digest mismatch.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show debug logging",
+    ),
+) -> None:
+    """Export generated evidence into a DuckDB database for SQL queries.
+
+    Parses every log source with the same parsers as ``eforge eval`` and writes one
+    row per record with its source file, line, host/sensor, raw text, and parsed
+    fields. Ground-truth files are never exported. Requires the optional ``duckdb``
+    extra.
+
+    Exit codes:
+    - 0: Export completed
+    - 1: Input error (missing dataset, unusable output path, duckdb not installed)
+    - 2: Schema validation error in scenario
+    - 22: A source could not be parsed or written
+    - 130: Interrupted
+    """
+    from evidenceforge.export import (
+        DuckDbDestinationError,
+        DuckDbUnavailableError,
+        export_dataset_to_duckdb,
+    )
+
+    if not output_dir.is_dir() or not os.access(output_dir, os.R_OK):
+        console.print(
+            f"[bold red]Error:[/bold red] output directory not found or unreadable: {output_dir}",
+            style="red",
+        )
+        raise typer.Exit(EXIT_INPUT_ERROR)
+    if scenario_file is not None and (
+        not scenario_file.is_file() or not os.access(scenario_file, os.R_OK)
+    ):
+        console.print(
+            f"[bold red]Error:[/bold red] scenario file not found or unreadable: {scenario_file}",
+            style="red",
+        )
+        raise typer.Exit(EXIT_INPUT_ERROR)
+
+    setup_logging(verbose)
+    console.print("[bold blue]EvidenceForge DuckDB Export[/bold blue]")
+    console.print(f"Output directory: {output_dir}")
+    scenario, _effective_config, data_dir = _load_dataset_inputs(
+        output_dir,
+        scenario_file,
+        allow_scenario_mismatch=allow_scenario_mismatch,
+        status_console=console,
+    )
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            console=console,
+            transient=False,
+        ) as progress:
+            task = progress.add_task("Exporting...", total=None)
+
+            def export_progress(event_type: str, data: dict[str, Any]) -> None:
+                if event_type == "source":
+                    progress.update(
+                        task,
+                        total=data["total"],
+                        completed=data["step"] - 1,
+                        description=f"Exporting {data['source_file']}",
+                    )
+
+            summary = export_dataset_to_duckdb(
+                data_dir,
+                database,
+                scenario=scenario,
+                overwrite=overwrite,
+                progress_callback=export_progress,
+            )
+            progress.update(task, completed=progress.tasks[task].total, description="Exported")
+    except KeyboardInterrupt:
+        console.print("\n[bold yellow]Interrupted by user (Ctrl+C)[/bold yellow]")
+        raise typer.Exit(EXIT_SIGINT)
+    except (DuckDbUnavailableError, DuckDbDestinationError) as e:
+        console.print(f"[bold red]Error:[/bold red] {e}", style="red")
+        raise typer.Exit(EXIT_INPUT_ERROR)
+    except EvidenceForgeError as e:
+        console.print(f"[bold red]Error:[/bold red] Export failed: {e}", style="red")
+        raise typer.Exit(EXIT_EVAL_ERROR)
+
+    table = Table(title="Exported records", box=box.SIMPLE)
+    table.add_column("Source format")
+    table.add_column("Records", justify="right")
+    for format_name, count in sorted(summary.format_counts.items()):
+        table.add_row(format_name, f"{count:,}")
+    console.print(table)
+    console.print(
+        f"[green]✓[/green] Wrote {summary.record_count:,} records from "
+        f"{summary.source_file_count} source files to {summary.database}"
+    )
+    if summary.parse_error_count:
+        console.print(
+            f"[yellow]{summary.parse_error_count:,} records carry parse errors; "
+            "see the parse_errors column.[/yellow]"
+        )
 
 
 @app.command("install-skills")
