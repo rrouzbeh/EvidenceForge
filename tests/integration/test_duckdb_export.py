@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -436,3 +437,51 @@ def test_export_dataset_to_duckdb_connect_failure_raises_destination_error(
         export_dataset_to_duckdb(dataset / "data", tmp_path / "evidence.duckdb", scenario=scenario)
 
     assert list(tmp_path.glob("*.duckdb*")) == []
+
+
+def _interrupted_duckdb_session(database: Path) -> None:
+    """Leave an uncheckpointed write-ahead log, as a crashed DuckDB session does."""
+
+    script = (
+        "import os, sys, duckdb\n"
+        "c = duckdb.connect(sys.argv[1])\n"
+        "c.execute(\"SET checkpoint_threshold = '1GB'\")\n"
+        "c.execute('CREATE TABLE notes (x INTEGER)')\n"
+        "c.execute('CHECKPOINT')\n"
+        "c.execute('INSERT INTO notes SELECT range FROM range(1000)')\n"
+        "os._exit(0)\n"
+    )
+    subprocess.run([sys.executable, "-c", script, str(database)], check=True)
+    assert database.with_name(f"{database.name}.wal").is_file()
+
+
+def test_export_dataset_to_duckdb_overwrite_replaces_stale_write_ahead_log(
+    dataset: Path, scenario: Scenario, tmp_path: Path
+) -> None:
+    database = tmp_path / "evidence.duckdb"
+    _interrupted_duckdb_session(database)
+
+    export_dataset_to_duckdb(dataset / "data", database, scenario=scenario, overwrite=True)
+
+    assert not database.with_name("evidence.duckdb.wal").exists()
+    connection = duckdb.connect(str(database))
+    try:
+        assert connection.execute("SELECT count(*) FROM records").fetchall() == [(4,)]
+    finally:
+        connection.close()
+
+
+def test_export_dataset_to_duckdb_refuses_orphan_write_ahead_log_without_overwrite(
+    dataset: Path, scenario: Scenario, tmp_path: Path
+) -> None:
+    database = tmp_path / "evidence.duckdb"
+    _interrupted_duckdb_session(database)
+    database.unlink()
+    wal = database.with_name("evidence.duckdb.wal")
+    log_bytes = wal.read_bytes()
+
+    with pytest.raises(DuckDbDestinationError, match="write-ahead log"):
+        export_dataset_to_duckdb(dataset / "data", database, scenario=scenario)
+
+    assert not database.exists()
+    assert wal.read_bytes() == log_bytes

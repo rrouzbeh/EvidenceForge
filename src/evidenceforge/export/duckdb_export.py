@@ -177,6 +177,12 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _wal_path(database: Path) -> Path:
+    """Return the write-ahead log DuckDB keeps next to a database file."""
+
+    return database.with_name(f"{database.name}.wal")
+
+
 def _validate_destination(database: Path, data_dir: Path, *, overwrite: bool) -> Path:
     """Resolve the database path and reject unsafe or accidental destinations."""
 
@@ -194,6 +200,18 @@ def _validate_destination(database: Path, data_dir: Path, *, overwrite: bool) ->
         if not overwrite:
             raise DuckDbDestinationError(
                 f"database already exists: {resolved}. Pass --overwrite to replace it."
+            )
+    # DuckDB replays <database>.wal on open. A log left by an interrupted session would be
+    # replayed against the new database and make it unreadable, so it belongs to the
+    # destination: refuse it without --overwrite, and remove it before replacing.
+    wal = _wal_path(resolved)
+    if wal.is_symlink() or wal.exists():
+        if wal.is_symlink() or not wal.is_file():
+            raise DuckDbDestinationError(f"database write-ahead log is not a file: {wal}")
+        if not overwrite:
+            raise DuckDbDestinationError(
+                f"a DuckDB write-ahead log from an earlier session exists: {wal}. "
+                "Pass --overwrite to replace the database and its log."
             )
     if not resolved.parent.is_dir():
         raise DuckDbDestinationError(f"database directory does not exist: {resolved.parent}")
@@ -333,7 +351,7 @@ def export_dataset_to_duckdb(
     sources = _discover_sources(data_dir, output_target)
 
     temp_database = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
-    temp_wal = temp_database.with_name(f"{temp_database.name}.wal")
+    temp_wal = _wal_path(temp_database)
     format_counts: dict[str, int] = {}
     parse_error_count = 0
     record_id = 0
@@ -408,6 +426,7 @@ def export_dataset_to_duckdb(
         )
         connection.execute("CHECKPOINT")
         connection.close()
+        _wal_path(destination).unlink(missing_ok=True)
         os.replace(temp_database, destination)
         completed = True
     except (duckdb.Error, OSError) as exc:

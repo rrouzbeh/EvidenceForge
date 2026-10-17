@@ -34,7 +34,7 @@ eforge export duckdb ./output -o investigation.duckdb
 | `OUTPUT_DIR` | Generated dataset: the bundle root or its `data/` directory |
 | `-o`, `--output` | Database file to write. It must be outside the `data/` directory |
 | `-s`, `--scenario` | Authored scenario; required only for legacy bundles without `RESOLVED_SCENARIO.yaml` |
-| `--overwrite` | Replace an existing database file |
+| `--overwrite` | Replace an existing database file, and any DuckDB write-ahead log (`<file>.wal`) left by an interrupted session |
 | `--allow-scenario-mismatch` | Export an authoritative bundle even if `--scenario` does not match it |
 | `-v`, `--verbose` | Debug logging |
 
@@ -48,7 +48,7 @@ dataset twice produces identical table contents.
 | Exit code | Meaning |
 |-----------|---------|
 | 0 | Export completed |
-| 1 | Input error: missing dataset, unusable output path, existing file without `--overwrite`, or DuckDB not installed |
+| 1 | Input error: missing dataset, unusable output path, existing database or leftover `.wal` without `--overwrite`, or DuckDB not installed |
 | 2 | Scenario schema validation error |
 | 22 | A source could not be parsed or written |
 | 130 | Interrupted |
